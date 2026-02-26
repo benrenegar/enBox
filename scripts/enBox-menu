@@ -1,0 +1,5 @@
+#!/bin/bash
+
+xdotool key SUPER
+
+exit 0

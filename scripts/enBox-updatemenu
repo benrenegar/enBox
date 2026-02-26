@@ -1,0 +1,7 @@
+#!/bin/bash
+
+~/scripts/enBox/enBox-app-discover > ~/.config/openbox/appmenu.xml
+notify-send "Application menu updated" "Discovered applications have been added to the application menu." -i dialog-information -t 5000
+echo Application menu updated.
+
+exit 0

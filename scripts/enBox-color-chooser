@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+import os
+import re
+import shutil
+import subprocess
+import time
+import tempfile
+import tkinter as tk
+from tkinter import messagebox, colorchooser, ttk
+
+THEMERC_PATH = os.path.expanduser("~/.themes/enBox/openbox-3/themerc")
+
+ACCENT_KEYS = [
+    "border.color",
+    "window.active.grip.bg.color",
+    "window.active.handle.bg.color",
+    "window.active.border.color",
+    "window.active.client.color",
+    "window.active.label.bg.color",
+    "window.active.title.bg.color",
+    "window.active.title.separator.color",
+    "window.active.button.*.bg.color",
+    "menu.border.color",
+    "menu.title.bg.color",
+    "osd.bg.color",
+    "osd.border.color",
+    "osd.label.bg.color",
+    "osd.hilight.bg.color",
+]
+
+FORE_TEXT_KEYS = [
+    "window.active.label.text.color",
+    "window.active.button.*.image.color",
+    "menu.title.text.color",
+    "osd.label.text.color",
+    "osd.hilight.bg.color"
+]
+
+SHADOW_FONT_KEYS = [
+    "window.active.label.text.font",
+    "menu.title.text.font",
+    "osd.label.text.font",
+]
+
+
+def make_key_re(key: str) -> re.Pattern:
+    # Groups:
+    # 1 indent, 2 key, 3 " : " separator (incl spaces), 4 value, 5 trailing spaces
+    return re.compile(rf"^(\s*)({re.escape(key)})(\s*:\s*)(.*?)(\s*)$")
+
+
+def normalize_hex_color(c: str) -> str:
+    c = c.strip()
+    if re.fullmatch(r"#([0-9a-fA-F]{6})", c):
+        return "#" + c[1:].upper()
+    raise ValueError("Color must be #RRGGBB")
+
+
+def hex_to_rgb01(hex_color: str):
+    h = normalize_hex_color(hex_color)[1:]
+    r = int(h[0:2], 16) / 255.0
+    g = int(h[2:4], 16) / 255.0
+    b = int(h[4:6], 16) / 255.0
+    return r, g, b
+
+
+def srgb_to_linear(c: float) -> float:
+    if c <= 0.04045:
+        return c / 12.92
+    return ((c + 0.055) / 1.055) ** 2.4
+
+
+def relative_luminance(hex_color: str) -> float:
+    r, g, b = hex_to_rgb01(hex_color)
+    rl = srgb_to_linear(r)
+    gl = srgb_to_linear(g)
+    bl = srgb_to_linear(b)
+    return 0.2126 * rl + 0.7152 * gl + 0.0722 * bl
+
+
+def contrast_ratio(l1: float, l2: float) -> float:
+    hi, lo = (l1, l2) if l1 >= l2 else (l2, l1)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def choose_bw_foreground(accent_hex: str) -> str:
+    L = relative_luminance(accent_hex)
+    cr_black = contrast_ratio(L, 0.0)
+    cr_white = contrast_ratio(L, 1.0)
+    return "#000000" if cr_black >= cr_white else "#FFFFFF"
+
+
+def shadow_params_for_foreground(fore_hex: str) -> tuple[int, int]:
+    """
+    If fore is black -> (-60, 1)
+    If fore is white -> ( 60, 1)
+    """
+    fore_hex = normalize_hex_color(fore_hex)
+    if fore_hex == "#000000":
+        return -60, 1
+    return 60, 1
+
+
+def apply_shadow_to_font_value(font_value: str, shadowtint: int, shadowoffset: int) -> str:
+    """
+    Preserve the rest of the font spec, but enforce:
+      shadow=y
+      shadowtint=<shadowtint>
+      shadowoffset=<shadowoffset>
+
+    Openbox font specs are usually colon-delimited tokens, e.g.:
+      name=Sans:size=10:weight=bold:shadow=y:shadowtint=-60:shadowoffset=1
+    """
+    # Split but keep empty-safe behavior
+    parts = [p for p in font_value.split(":") if p != ""]
+
+    # Remove any existing shadow tokens
+    def is_shadow_token(tok: str) -> bool:
+        return tok.startswith("shadow=") or tok.startswith("shadowtint=") or tok.startswith("shadowoffset=")
+
+    kept = [p for p in parts if not is_shadow_token(p)]
+
+    # Append enforced tokens
+    kept.append("shadow=y")
+    kept.append(f"shadowtint={shadowtint}")
+    kept.append(f"shadowoffset={shadowoffset}")
+
+    return ":".join(kept)
+
+
+def backup_file(path: str) -> str:
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    backup = f"{path}.bak.{ts}"
+    shutil.copy2(path, backup)
+    return backup
+
+
+def detect_newline_style(lines: list[str]) -> str:
+    for ln in lines:
+        if ln.endswith("\r\n"):
+            return "\r\n"
+        if ln.endswith("\n"):
+            return "\n"
+    return "\n"
+
+
+def atomic_write(path: str, content: str):
+    d = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".themerc.", dir=d)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
+def update_themerc(path: str, accent_hex: str, fore_hex: str):
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+
+    backup = backup_file(path)
+
+    with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+        lines = f.readlines()
+
+    nl = detect_newline_style(lines)
+
+    # Build desired values
+    target_colors = {k: accent_hex for k in ACCENT_KEYS}
+    target_colors.update({k: fore_hex for k in FORE_TEXT_KEYS})
+
+    shadowtint, shadowoffset = shadow_params_for_foreground(fore_hex)
+
+    # All keys we might touch
+    all_keys = list(target_colors.keys()) + SHADOW_FONT_KEYS
+    found = {k: False for k in all_keys}
+    regexes = {k: make_key_re(k) for k in all_keys}
+
+    out_lines = []
+    changed = False
+
+    for original in lines:
+        # Preserve newline
+        if original.endswith("\r\n"):
+            line_ending = "\r\n"
+            body = original[:-2]
+        elif original.endswith("\n"):
+            line_ending = "\n"
+            body = original[:-1]
+        else:
+            line_ending = ""
+            body = original
+
+        replaced = False
+
+        for k, r in regexes.items():
+            m = r.match(body)
+            if not m:
+                continue
+
+            found[k] = True
+            prefix_ws, key_txt, sep_txt, old_val, suffix_ws = m.groups()
+
+            # Color keys: replace whole value with hex
+            if k in target_colors:
+                new_val = target_colors[k]
+                new_body = f"{prefix_ws}{key_txt}{sep_txt}{new_val}{suffix_ws}"
+
+            # Font keys: preserve old value, but enforce shadow tokens
+            else:
+                new_font_val = apply_shadow_to_font_value(old_val, shadowtint, shadowoffset)
+                new_body = f"{prefix_ws}{key_txt}{sep_txt}{new_font_val}{suffix_ws}"
+
+            new_line = new_body + (line_ending or nl)
+            if new_line != original:
+                changed = True
+
+            out_lines.append(new_line)
+            replaced = True
+            break
+
+        if not replaced:
+            out_lines.append(original)
+
+    # Append missing keys (best-effort; font keys get just the shadow tokens)
+    missing = [k for k, v in found.items() if not v]
+    if missing:
+        changed = True
+        out_lines.append(nl + "# Added by accent picker" + nl)
+        for k in missing:
+            if k in target_colors:
+                out_lines.append(f"{k}: {target_colors[k]}{nl}")
+            else:
+                # If the font key is missing, we can only add the shadow tokens.
+                # This is still syntactically valid, but may not define the font face/size.
+                out_lines.append(
+                    f"{k}: shadow=y:shadowtint={shadowtint}:shadowoffset={shadowoffset}{nl}"
+                )
+
+    if changed:
+        atomic_write(path, "".join(out_lines))
+
+    return changed, backup
+
+
+def reconfigure_openbox():
+    proc = subprocess.run(
+        ["openbox", "--reconfigure"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "openbox --reconfigure failed")
+
+
+def apply_system_icon(root: tk.Tk):
+    """
+    Try to load 'colorpicker' from system icon theme via GTK (optional).
+    Falls back silently if GTK/PyGObject isn't available.
+    """
+    try:
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk
+
+        theme = Gtk.IconTheme.get_default()
+        info = theme.lookup_icon("colorpicker", 64, 0)
+        if info:
+            pixbuf = info.load_icon()
+            ok, png_bytes = pixbuf.save_to_bufferv("png", [], [])
+            if ok:
+                img = tk.PhotoImage(data=png_bytes)
+                root.iconphoto(True, img)
+                root._icon_ref = img  # keep reference
+    except Exception:
+        pass
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("enBox Accent Color")
+        self.resizable(False, False)
+        apply_system_icon(self)
+
+        self.color = tk.StringVar(value="#FFC125")
+        self.color.trace_add("write", lambda *_: self._refresh_preview())
+
+        frm = tk.Frame(self, padx=15, pady=15)
+        frm.pack()
+
+        tk.Label(
+            frm,
+            text="Accent Color Picker",
+            wraplength=380,
+            justify="left",
+            font=("Sans", 14, "bold")
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
+        tk.Label(
+            frm,
+            text="Choose or enter a color to apply as the accent for the enBox desktop theme.",
+            wraplength=380,
+            justify="left",
+            font=("Sans", 11, "normal")
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
+        tk.Entry(frm, textvariable=self.color, width=10).grid(row=2, column=1, padx=0, sticky="w")
+
+        self.swatch = tk.Canvas(frm, width=100, height=26, bd=1, relief="raised", highlightthickness=1)
+        self.swatch.grid(row=2, column=0, sticky="w")
+        self.swatch.bind("<Button-1>", lambda _e: self.pick())
+
+        separator = ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=3, column=0, columnspan=3, padx=0, pady=15, sticky="ew")
+
+        btns = tk.Frame(frm, pady=5)
+        btns.grid(row=4, column=0, columnspan=3, sticky="e")
+        tk.Button(btns, text="Apply", command=self.apply).pack(side="left", padx=0)
+        tk.Button(btns, text="Quit", command=self.destroy).pack(side="left", padx=10)
+
+        self._refresh_preview()
+
+    def _refresh_preview(self):
+        try:
+            accent = normalize_hex_color(self.color.get())
+            fore = choose_bw_foreground(accent)
+            tint, offset = shadow_params_for_foreground(fore)
+
+            self.swatch.delete("all")
+            self.swatch.create_rectangle(0, 0, 104, 30, fill=accent, outline="")
+            
+        except Exception:
+            self.swatch.delete("all")
+            self.fore_label.config(text="Text/label color: (invalid accent color)")
+            self.shadow_label.config(text="Shadow: (n/a)")
+
+    def pick(self):
+        _, c = colorchooser.askcolor(color=self.color.get())
+        if c:
+            self.color.set(normalize_hex_color(c))
+
+    def apply(self):
+        try:
+            accent = normalize_hex_color(self.color.get())
+            fore = choose_bw_foreground(accent)
+
+            changed, backup = update_themerc(THEMERC_PATH, accent, fore)
+            reconfigure_openbox()
+
+            tint, offset = shadow_params_for_foreground(fore)
+
+            messagebox.showinfo(
+                "enBox",
+                f"The new accent color has been applied."
+            )
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+
+if __name__ == "__main__":
+    App().mainloop()

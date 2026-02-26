@@ -1,0 +1,20 @@
+#lxdm {
+	background-image: url("bg.png");
+	background-repeat: round;
+}
+
+#eventbox1 {
+	background-color: rgba(0,0,0,0.15);
+}
+
+#prompt {
+	font: FiraGO 18;
+	font-weight: bold;
+	color: #646566;
+}
+
+#login_entry {
+	font: FiraGO 18;
+	border-color: #646566;
+	border-radius: 5;
+}

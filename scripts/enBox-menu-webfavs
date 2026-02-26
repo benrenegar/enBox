@@ -1,0 +1,80 @@
+#!/bin/sh
+# Generate "Bookmarks Toolbar websites" OpenBox dynamic menu
+
+# Function to extract favicon URL from HTML
+#!/bin/bash
+
+# Function to extract favicon URL from HTML
+
+# path to the sqlite3 binary
+sqlite_path=`which sqlite3`
+
+# sqlite3 parameters (define separator character)
+sqlite_params="-separator ^"
+
+# path to the places.sqlite database
+bookmarks_database=`ls ~/.mozilla/firefox/*.default-esr/places.sqlite`
+cp $bookmarks_database "bmtmp.sqlite"
+
+# SQL query 
+sql_query_folders="SELECT b.id as fid, b.title as folder FROM moz_bookmarks AS b WHERE b.type = 2 AND b.parent = 3"
+
+# browser path
+browser_path=`which firefox`
+
+# header
+echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+echo "<openbox_pipe_menu>";
+
+# execute and parse sql query
+$sqlite_path $sqlite_params "bmtmp.sqlite" "$sql_query_folders"| while IFS=^ read fid folder; do
+  
+	fid=$fid
+	folder=$(echo $folder | sed -e "s/&/\&amp;/g" -e "s/\"/\&quot;/g" -e "s/</\&lt;/g" -e "s/>/\&gt;/g")
+	echo "<menu id=\"bm-$fid\" label=\"$folder\" icon=\"/usr/share/icons/ob-menu-icons/folder.svg\">"
+	sql_query_items="SELECT b.id AS id, b.title AS title, p.url AS url FROM moz_bookmarks AS b JOIN moz_places AS p ON b.fk = p.id WHERE b.parent = ${fid} ORDER BY title ASC"
+	$sqlite_path $sqlite_params "bmtmp.sqlite" "$sql_query_items"| while IFS=^ read id title url; do
+		  # special case for empty title
+		  if [ -z "$title" ]; then
+			 title=$url
+		  fi
+
+		  # escape special characters
+		  title=$(echo $title | sed -e "s/&/\&amp;/g" -e "s/\"/\&quot;/g" -e "s/</\&lt;/g" -e "s/>/\&gt;/g")
+		  url=$(echo $url | sed -e "s/&/\&amp;/g" -e "s/\"/\&quot;/g" -e "s/</\&lt;/g" -e "s/>/\&gt;/g")
+
+		  # add missing apostrophes
+		  title="\"$title\""
+		  
+		  #item
+		  echo "<item label=$title icon=\"/usr/share/icons/ob-menu-icons/webfile.svg\"><action name=\"Execute\"><execute>$browser_path $url</execute></action></item>" 
+	done	
+   echo "</menu>"
+
+done
+sql_query_items="SELECT b.id AS id, b.title AS title, p.url AS url FROM moz_bookmarks AS b JOIN moz_places AS p ON b.fk = p.id WHERE b.parent = 3 ORDER BY title ASC"
+	$sqlite_path $sqlite_params "bmtmp.sqlite" "$sql_query_items"| while IFS=^ read id title url; do
+		  # special case for empty title
+		  if [ -z "$title" ]; then
+			 title=$url
+		  fi
+
+		  # escape special characters
+		  title=$(echo $title | sed -e "s/&/\&amp;/g" -e "s/\"/\&quot;/g" -e "s/</\&lt;/g" -e "s/>/\&gt;/g")
+		  url=$(echo $url | sed -e "s/&/\&amp;/g" -e "s/\"/\&quot;/g" -e "s/</\&lt;/g" -e "s/>/\&gt;/g")
+
+		  # add missing apostrophes
+		  title="\"$title\""
+		  
+		  #item
+		  echo "<item label=$title icon=\"/usr/share/icons/ob-menu-icons/webfile.svg\"><action name=\"Execute\"><execute>$browser_path $url</execute></action></item>" 
+	done	
+
+if [ "$COUNTER" = 0 ]; then
+	echo "<separator label=\"Could not access Firefox bookmarks.\" />" 
+fi
+
+# footer
+echo "</openbox_pipe_menu>"
+
+rm "bmtmp.sqlite"

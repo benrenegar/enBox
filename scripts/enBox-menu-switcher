@@ -1,0 +1,28 @@
+#!/bin/sh
+
+TEMPFILE=/tmp/$$.tmp
+COUNTER=0
+
+# header
+echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+echo "<openbox_pipe_menu>";
+
+# menu items
+wmctrl -l | while read line ; do
+	wintitle=$(echo $line | sed 's/^[^ ]* *[^ ]* *[^ ]* //')
+	desktop=$(echo $line | awk '{print $2}')
+	if [ "$desktop" != -1 ]; then
+		echo "<item label=\"⬒ "$wintitle"\"><action name=\"Execute\"><execute>wmctrl -a \""$wintitle"\"</execute></action></item>" 
+		COUNTER=$((COUNTER+1))
+	fi
+	echo $COUNTER > $TEMPFILE
+done
+
+COUNTER=$(cat $TEMPFILE)
+unlink $TEMPFILE
+if [ "$COUNTER" = 0 ]; then
+	echo "<separator label=\"No open windows\" />" 
+fi
+
+# footer
+echo "</openbox_pipe_menu>"

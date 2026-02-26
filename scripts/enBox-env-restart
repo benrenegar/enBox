@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Reset desktop environment
+echo - - - Restarting desktop environment - - -
+echo
+echo [1] Compositor
+cbpp-compositor --restart > /dev/null 2>&1 
+echo [2] Window manager
+openbox --restart > /dev/null 2>&1
+echo [3] Taskbar/panel
+tint2restart > /dev/null 2>&1
+(sleep 2s && tint2 -c ~/.config/tint2/tint2rc-launchbar > /dev/null 2>&1) &
+echo [4] Desktop
+nitrogen --restore > /dev/null 2>&1
+conkywonky > /dev/null 2>&1
+echo [5] Fonts
+fc-cache -f -v > /dev/null 2>&1
+echo [6] Icons
+sudo gtk-update-icon-cache -f -t /usr/share/icons/Papirus/ > /dev/null 2>&1
+echo [7] X Resources
+xrdb -merge ~/.Xresources
+
+(sleep 3s && notify-send "enBox" "The desktop environment has been restarted." -i state_running -t 5000)
+
+exit 0

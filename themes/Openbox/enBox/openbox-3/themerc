@@ -1,0 +1,134 @@
+!!
+!! enBox 
+!! OpenBox Theme
+!! Ben Renegar
+!! www.benrenegar.com
+!!
+
+
+!! Do not modify this file directly. Use the companion Accent Color Picker
+!! to easily change the color theming.
+
+
+!! GLOBAL  ---------------------------------------------------------------------
+
+border.width: 2
+padding.width: 6
+padding.height: 5
+window.client.padding.width: 0
+border.color: #FFC125
+
+!! WINDOW FRAME  ---------------------------------------------------------------
+
+window.label.text.justify: center
+window.handle.width: 0
+window.*.handle.bg: solid flat
+window.*.grip.bg: solid flat
+window.active.handle.bg.color: #FFC125
+window.active.grip.bg.color: #FFC125
+window.inactive.handle.bg.color: grey60
+window.inactive.grip.bg.color: grey60
+
+
+!! ACTIVE WINDOWS  -------------------------------------------------------------
+
+window.active.border.color: #FFC125
+window.active.client.color: #FFC125
+
+!! Titlebar
+window.active.label.text.font: shadow=y:shadowtint=-60:shadowoffset=1
+window.active.label.bg: solid flat
+window.active.label.bg.color: #FFC125
+window.active.label.text.color: #000000
+window.active.title.bg: focus: solid flat 
+window.active.title.bg.color: #FFC125
+window.active.title.separator.color: #FFC125
+
+!! Window buttons (close, min, max)
+window.active.button.*.bg: flat
+window.active.button.*.bg.color: #FFC125
+window.active.button.*.image.color: #000000
+window.active.button.*.pressed.bg: solid sunken
+
+!! Red close button
+window.active.button.close.*.bg.color: red
+window.active.button.close.*.image.color: white
+
+!! Disabled buttons
+window.active.button.*.disabled.image.color: grey50
+
+
+!! INACTIVE WINDOWS ------------------------------------------------------------
+
+window.inactive.border.color: grey60
+window.inactive.client.color: grey60
+
+!! Titlebar
+window.inactive.label.text.font: shadow=y:shadowtint=-60:shadowoffset=1
+window.inactive.label.bg: parentrelative
+window.inactive.label.text.color: grey30
+window.inactive.title.bg: flat 
+window.inactive.title.bg.color: grey60
+window.inactive.title.separator.color: grey60
+
+!! Window buttons (close, min, maxs)
+window.inactive.button.*.bg: flat
+window.inactive.button.*.bg.color: grey60
+window.inactive.button.*.image.color: grey40
+window.inactive.button.*.pressed.bg: solid sunken
+
+!! Disabled buttons
+window.inactive.button.*.disabled.image.color: grey50
+
+
+!! MENUS  ----------------------------------------------------------------------
+
+menu.border.color: #FFC125
+menu.border.width: 2
+menu.overlap.x: -5
+
+!! Titles
+menu.title.bg: solid flat 
+menu.title.bg.color: #FFC125
+menu.title.text.color: #000000
+menu.title.text.justify: left
+menu.title.text.font: shadow=y:shadowtint=-60:shadowoffset=1
+
+!! Separator
+menu.separator.color: grey60
+menu.separator.padding.width: 4
+menu.separator.padding.height: 4
+
+!! Menu Items
+menu.items.justify: left
+menu.items.bg: solid flat
+menu.items.bg.color: grey80
+menu.items.text.color: black
+menu.items.disabled.text.color: dimgrey
+
+!! Menu Items - Hovered
+menu.items.active.bg: flat gradient vertical border
+menu.items.active.bg.color: grey60
+menu.items.active.bg.colorTo: grey50
+menu.items.active.bg.border.color: grey40
+menu.items.active.text.color: white
+
+!! Bullet
+menu.bullet.image.color: black
+menu.bullet.selected.image.color: white
+
+
+!! OSD MENU --------------------------------------------------------------------
+
+osd.bg: solid flat
+osd.bg.color: #FFC125
+osd.border.color: #FFC125
+osd.border.width: 2
+osd.label.bg: solid flat
+osd.label.bg.color: #FFC125
+osd.label.text.color: #000000
+osd.label.text.font: shadow=y:shadowtint=-60:shadowoffset=1
+osd.hilight.bg: solid flat
+osd.hilight.bg.color: #000000
+osd.unhilight.bg: solid flat
+osd.unhilight.bg.color: grey60

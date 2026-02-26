@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+
+# enBox Environment Exit script
+
+choice=$(yad \
+  --title="enBox Session" \
+  --window-icon=system-shutdown \
+  --text="Currently logged in as $USER@$HOSTNAME\n" \
+  --width=400 \
+  --borders=20 \
+  --fixed \
+  --center \
+  --buttons-layout=grid \
+  --button=" Log out!system-log-out:0" \
+  --button=" Shutdown!system-shutdown:1" \
+  --button=" Restart!system-reboot:2" \
+  --button=" Sleep!system-suspend:3" \
+  --button=" Hibernate!system-hibernate:4" \
+  --escape-ok \
+  --no-markup
+)
+
+exit_code=$?
+
+case "$exit_code" in
+  0)
+    openbox --exit
+    ;;
+  1)
+    systemctl poweroff
+    ;;
+  2)
+    systemctl reboot
+    ;;
+  3)
+    xscreensaver-command -lock && systemctl suspend
+    ;;
+  4)
+    systemctl hibernate
+    ;;
+  *)
+    # Cancel or ESC — do nothing
+    exit 0
+    ;;
+esac
