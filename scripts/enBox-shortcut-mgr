@@ -1,0 +1,808 @@
+#!/usr/bin/env python3
+#
+#                ____            
+#    ___  ____  / __ )____  _  __
+#   / _ \/ __ \/ __  / __ \| |/_/
+#  /  __/ / / / /_/ / /_/ />  <  
+# \___/_/ /_/_____/\____/_/|_|  
+#
+# enBox Desktop Environment
+# Shortcut Manager
+#
+# GTK3 editor for Openbox rc.xml <keyboard> keybinds.
+# - Reads ~/.config/openbox/rc.xml
+# - Replaces ONLY the <keyboard>...</keyboard> section on save
+# - Add/Edit/Delete keybinds
+# - Captures shortcuts into Openbox syntax (C-A-S-W-...)
+#
+# Dependencies: python3-gi (GTK3), standard library only.
+
+
+import os
+import re
+import subprocess
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk
+
+from xml.dom import minidom
+from xml.dom.minidom import Element, Node
+
+
+RC_DEFAULT = os.path.expanduser("~/.config/openbox/rc.xml")
+
+
+# -----------------------------
+# Data model
+# -----------------------------
+
+@dataclass
+class Keybind:
+    key: str
+    actions_xml: str  # one or more <action ...>...</action> blocks, raw
+
+
+# -----------------------------
+# Display helpers
+# -----------------------------
+
+MOD_DISPLAY = {
+    "C": "CTRL",
+    "A": "ALT",
+    "S": "SHIFT",
+    "W": "SUPER",
+}
+
+def pretty_keybind(key: str) -> str:
+    """
+    Convert Openbox key syntax like 'C-A-S-F12' into 'CTRL + ALT + SHIFT + F12'
+    Keeps non-mod tokens as-is (but uppercases single letters for display).
+    """
+    key = (key or "").strip()
+    if not key:
+        return ""
+
+    parts = [p for p in key.split("-") if p]
+    if not parts:
+        return key
+
+    mods = []
+    tail = []
+
+    # Openbox puts mods as single letters; we treat any known mod token as a mod.
+    for p in parts:
+        if p in MOD_DISPLAY:
+            mods.append(MOD_DISPLAY[p])
+        else:
+            tail.append(p)
+
+    # For display, if last key is a single letter, show uppercase (e.g. "d" -> "D")
+    if tail:
+        last = tail[-1]
+        if len(last) == 1:
+            tail[-1] = last.upper()
+
+    # If there were no mods, just return the key nicely
+    if not mods:
+        return " + ".join(tail) if tail else key
+
+    if not tail:
+        return " + ".join(mods)
+
+    return " + ".join(mods + tail)
+
+
+def summarize_actions(actions_xml: str) -> str:
+    """
+    Human-friendly one-line summary.
+    Examples:
+      Execute subl
+      ShowMenu root-menu
+      GoToDesktop left (wrap=no)
+      SendToDesktop 2 (wrap=yes)
+      Close
+      ToggleMaximize
+      Multi: Lower, FocusToBottom, Unfocus
+    """
+    ax = (actions_xml or "").strip()
+    if not ax:
+        return ""
+
+    # Extract action names in order
+    names = re.findall(r'<action\s+name="([^"]+)"', ax)
+    if not names:
+        return ax.replace("\n", " ")[:120]
+
+    # If exactly one action, try to enrich with details
+    if len(names) == 1:
+        name = names[0]
+
+        if name == "Execute":
+            cmd = ""
+            m = re.search(r"<command>(.*?)</command>", ax, re.DOTALL)
+            if m:
+                cmd = unescape_xml(m.group(1).strip())
+            return f"Execute {cmd}".strip()
+
+        if name == "ShowMenu":
+            m = re.search(r"<menu>(.*?)</menu>", ax, re.DOTALL)
+            menu = unescape_xml(m.group(1).strip()) if m else ""
+            return f"ShowMenu {menu}".strip()
+
+        if name in ("GoToDesktop", "SendToDesktop"):
+            m_to = re.search(r"<to>(.*?)</to>", ax, re.DOTALL)
+            m_wr = re.search(r"<wrap>(.*?)</wrap>", ax, re.DOTALL)
+            to = unescape_xml(m_to.group(1).strip()) if m_to else ""
+            wrap = (m_wr.group(1).strip().lower() if m_wr else "")
+            wrap = wrap if wrap else "no"
+            return f"{name} {to} (wrap={wrap})".strip()
+
+        # Generic single-action summary
+        return name
+
+    # Multiple actions
+    return "Multi: " + ", ".join(names)
+
+
+def unescape_xml(s: str) -> str:
+    return (s.replace("&lt;", "<")
+             .replace("&gt;", ">")
+             .replace("&amp;", "&"))
+
+
+# -----------------------------
+# XML helpers
+# -----------------------------
+
+KB_RE = re.compile(r"(<keyboard\b[^>]*>.*?</keyboard>)", re.DOTALL)
+
+def extract_keyboard_section(rc_text: str) -> Tuple[str, int, int]:
+    """Return (<keyboard>...</keyboard>, start_idx, end_idx). Raises ValueError if missing."""
+    m = KB_RE.search(rc_text)
+    if not m:
+        raise ValueError("Could not find <keyboard>...</keyboard> section in rc.xml")
+    return m.group(1), m.start(1), m.end(1)
+
+def parse_keyboard_dom(keyboard_xml: str) -> Element:
+    """Parse keyboard section into a DOM Element (the <keyboard> node)."""
+    keyboard_xml = sanitize_openbox_keyboard_xml(keyboard_xml)
+    wrapped = f"<root>\n{keyboard_xml}\n</root>"
+    dom = minidom.parseString(wrapped.encode("utf-8"))
+    root = dom.documentElement
+    for child in root.childNodes:
+        if child.nodeType == Node.ELEMENT_NODE and child.tagName == "keyboard":
+            return child
+    raise ValueError("Parsed XML but didn't find <keyboard> element")
+
+def iter_keybind_elements(keyboard_el: Element) -> List[Element]:
+    out = []
+    for n in keyboard_el.childNodes:
+        if n.nodeType == Node.ELEMENT_NODE and n.tagName == "keybind":
+            out.append(n)
+    return out
+
+def get_attr(el: Element, name: str) -> str:
+    return el.getAttribute(name) if el.hasAttribute(name) else ""
+
+def inner_xml(node: Node) -> str:
+    """Serialize children of node (not including node itself)."""
+    parts = []
+    for ch in node.childNodes:
+        parts.append(ch.toxml())
+    return "".join(parts)
+
+def pretty_keyboard_xml(keyboard_el: Element) -> str:
+    """
+    Pretty-print ONLY the <keyboard> element.
+    Keeps comments that are inside <keyboard> as DOM preserves them.
+    """
+    doc = minidom.Document()
+    root = doc.createElement("root")
+    doc.appendChild(root)
+
+    keyboard_clone = keyboard_el.cloneNode(deep=True)
+    root.appendChild(keyboard_clone)
+
+    pretty = doc.toprettyxml(indent="  ")
+
+    lines = [ln.rstrip() for ln in pretty.splitlines() if ln.strip()]
+
+    start = None
+    end = None
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("<keyboard"):
+            start = i
+        if ln.lstrip().startswith("</keyboard>"):
+            end = i
+            break
+    if start is None or end is None:
+        raise ValueError("Pretty printer failed to locate <keyboard> in output")
+
+    kb_lines = lines[start:end+1]
+    return "\n".join(kb_lines) + "\n"
+
+def dom_from_actions_xml(actions_xml: str) -> List[Node]:
+    wrapped = f"<root>\n{actions_xml}\n</root>"
+    dom = minidom.parseString(wrapped.encode("utf-8"))
+    root = dom.documentElement
+    return [n for n in root.childNodes if not (n.nodeType == Node.TEXT_NODE and not n.data.strip())]
+
+def keybinds_from_dom(keyboard_el: Element) -> List[Keybind]:
+    binds: List[Keybind] = []
+    for kb in iter_keybind_elements(keyboard_el):
+        key = get_attr(kb, "key").strip()
+        axml = inner_xml(kb).strip()
+        binds.append(Keybind(key=key, actions_xml=axml))
+    return binds
+
+def update_dom_with_keybinds(keyboard_el: Element, binds: List[Keybind]) -> None:
+    """
+    Replace all existing <keybind> elements in keyboard_el with binds.
+    Preserves other children (like chainQuitKey and comments) by removing only keybind elements.
+    """
+    for kb in iter_keybind_elements(keyboard_el):
+        keyboard_el.removeChild(kb)
+
+    owner = keyboard_el.ownerDocument
+
+    def append_text(s: str):
+        keyboard_el.appendChild(owner.createTextNode(s))
+
+    append_text("\n")
+
+    for b in binds:
+        kb_el = owner.createElement("keybind")
+        kb_el.setAttribute("key", b.key)
+
+        append_text("  ")
+        keyboard_el.appendChild(kb_el)
+        kb_el.appendChild(owner.createTextNode("\n"))
+
+        nodes = dom_from_actions_xml(b.actions_xml)
+        for n in nodes:
+            imported = minidom.parseString(n.toxml().encode("utf-8")).documentElement
+            imported = owner.importNode(imported, deep=True)
+            kb_el.appendChild(owner.createTextNode("    "))
+            kb_el.appendChild(imported)
+            kb_el.appendChild(owner.createTextNode("\n"))
+
+        append_text("  ")
+        kb_el.appendChild(owner.createTextNode(""))
+        keyboard_el.appendChild(owner.createTextNode("\n"))
+
+HASH_COMMENT_RE = re.compile(r'(^[ \t]*)#(.*)$', re.MULTILINE)
+
+def sanitize_openbox_keyboard_xml(xml: str) -> str:
+    """
+    Openbox rc.xml often contains non-XML '# comments' inside <keyboard>/<keybind>.
+    xml.dom.minidom is strict XML, so convert those lines to <!-- ... -->.
+
+    Also ensures we don't accidentally create invalid XML comments containing '--' or ending with '-'.
+    """
+    def repl(m: re.Match) -> str:
+        indent = m.group(1)
+        text = (m.group(2) or "").strip()
+        if not text:
+            text = " "
+        # XML comments cannot contain '--' and cannot end with '-'
+        text = text.replace("--", "—")  # em dash to keep meaning
+        while text.endswith("-"):
+            text += " "
+        return f"{indent}<!-- {text} -->"
+    return HASH_COMMENT_RE.sub(repl, xml)
+
+
+# -----------------------------
+# Shortcut capture widget
+# -----------------------------
+
+class ShortcutEntry(Gtk.Entry):
+    """
+    A Gtk.Entry that captures the next keypress into Openbox shortcut syntax.
+    """
+    def __init__(self):
+        super().__init__()
+        self.set_placeholder_text("Click here, then press shortcut…")
+        self.set_can_focus(True)
+        self.connect("key-press-event", self.on_key_press)
+
+    @staticmethod
+    def to_openbox_syntax(event: Gdk.EventKey) -> Optional[str]:
+        state = event.state
+
+        mods = []
+        if state & Gdk.ModifierType.CONTROL_MASK:
+            mods.append("C")
+        if state & Gdk.ModifierType.MOD1_MASK:
+            mods.append("A")
+        if state & Gdk.ModifierType.SHIFT_MASK:
+            mods.append("S")
+        if state & Gdk.ModifierType.SUPER_MASK:
+            mods.append("W")
+
+        keyname = Gdk.keyval_name(event.keyval)
+        if not keyname:
+            return None
+
+        if len(keyname) == 1:
+            keyname = keyname.lower()
+
+        if mods:
+            return "-".join(mods + [keyname])
+        return keyname
+
+    def on_key_press(self, widget, event: Gdk.EventKey):
+        keyname = Gdk.keyval_name(event.keyval) or ""
+        if keyname in ("Shift_L", "Shift_R", "Control_L", "Control_R",
+                       "Alt_L", "Alt_R", "Super_L", "Super_R", "Meta_L", "Meta_R"):
+            return True
+
+        ob = self.to_openbox_syntax(event)
+        if ob:
+            self.set_text(ob)
+            self.set_position(len(ob))
+        return True
+
+
+# -----------------------------
+# Action editor dialog
+# -----------------------------
+
+ACTION_TYPES = [
+    ("Execute", "Execute a command"),
+    ("ShowMenu", "Open an Openbox menu"),
+    ("GoToDesktop", "Switch desktops"),
+    ("SendToDesktop", "Send window to desktop"),
+    ("Raw", "Edit raw <action> XML"),
+]
+
+class KeybindDialog(Gtk.Dialog):
+    def __init__(self, parent: Gtk.Window, title: str, initial: Optional[Keybind] = None):
+        super().__init__(title=title, transient_for=parent, modal=True)
+        self.set_default_size(640, 420)
+
+        box = self.get_content_area()
+        box.set_spacing(10)
+        box.set_border_width(12)
+
+        grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        box.add(grid)
+
+        grid.attach(Gtk.Label(label="Shortcut:", xalign=1.0), 0, 0, 1, 1)
+        self.shortcut = ShortcutEntry()
+        grid.attach(self.shortcut, 1, 0, 2, 1)
+
+        grid.attach(Gtk.Label(label="Action type:", xalign=1.0), 0, 1, 1, 1)
+        self.action_combo = Gtk.ComboBoxText()
+        for k, desc in ACTION_TYPES:
+            self.action_combo.append(k, f"{k} — {desc}")
+        self.action_combo.set_active_id("Execute")
+        grid.attach(self.action_combo, 1, 1, 2, 1)
+
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_transition_duration(120)
+        grid.attach(self.stack, 0, 2, 3, 1)
+
+        exec_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        hb = Gtk.Box(spacing=10)
+        hb.pack_start(Gtk.Label(label="Command:", xalign=0.0), False, False, 0)
+        self.exec_cmd = Gtk.Entry()
+        hb.pack_start(self.exec_cmd, True, True, 0)
+        exec_box.pack_start(hb, False, False, 0)
+
+        sn_frame = Gtk.Frame(label="Startup notify (optional)")
+        sn_grid = Gtk.Grid(column_spacing=10, row_spacing=10, border_width=10)
+        sn_frame.add(sn_grid)
+        self.sn_enabled = Gtk.CheckButton(label="enabled")
+        self.sn_name = Gtk.Entry()
+        self.sn_name.set_placeholder_text("name (e.g. Terminal)")
+        sn_grid.attach(self.sn_enabled, 0, 0, 1, 1)
+        sn_grid.attach(Gtk.Label(label="name:", xalign=1.0), 0, 1, 1, 1)
+        sn_grid.attach(self.sn_name, 1, 1, 1, 1)
+        exec_box.pack_start(sn_frame, False, False, 0)
+        self.stack.add_named(exec_box, "Execute")
+
+        menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        hb2 = Gtk.Box(spacing=10)
+        hb2.pack_start(Gtk.Label(label="Menu:", xalign=0.0), False, False, 0)
+        self.menu_name = Gtk.Entry()
+        self.menu_name.set_placeholder_text("root-menu, client-menu, client-list-combined-menu, …")
+        hb2.pack_start(self.menu_name, True, True, 0)
+        menu_box.pack_start(hb2, False, False, 0)
+        self.stack.add_named(menu_box, "ShowMenu")
+
+        def make_desktop_box() -> Gtk.Box:
+            b = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            g = Gtk.Grid(column_spacing=10, row_spacing=10)
+            b.pack_start(g, False, False, 0)
+            g.attach(Gtk.Label(label="to:", xalign=1.0), 0, 0, 1, 1)
+            to = Gtk.Entry()
+            to.set_placeholder_text("left/right/up/down or number")
+            g.attach(to, 1, 0, 1, 1)
+            wrap = Gtk.CheckButton(label="wrap")
+            g.attach(wrap, 1, 1, 1, 1)
+            b.to_entry = to         # type: ignore
+            b.wrap_check = wrap     # type: ignore
+            return b
+
+        self.goto_box = make_desktop_box()
+        self.send_box = make_desktop_box()
+        self.stack.add_named(self.goto_box, "GoToDesktop")
+        self.stack.add_named(self.send_box, "SendToDesktop")
+
+        raw_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        raw_box.pack_start(Gtk.Label(label="Raw actions XML (one or more <action> blocks):", xalign=0.0), False, False, 0)
+        self.raw_view = Gtk.TextView()
+        self.raw_view.set_monospace(True)
+        self.raw_view.set_wrap_mode(Gtk.WrapMode.NONE)
+        sw = Gtk.ScrolledWindow()
+        sw.set_hexpand(True)
+        sw.set_vexpand(True)
+        sw.add(self.raw_view)
+        raw_box.pack_start(sw, True, True, 0)
+        self.stack.add_named(raw_box, "Raw")
+
+        self.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        self.add_button("OK", Gtk.ResponseType.OK)
+
+        self.action_combo.connect("changed", self.on_action_changed)
+        self.on_action_changed(self.action_combo)
+
+        if initial:
+            self.shortcut.set_text(initial.key)
+            detected = self.detect_action_type(initial.actions_xml)
+            self.action_combo.set_active_id(detected)
+            self.load_actions_into_ui(detected, initial.actions_xml)
+
+        self.show_all()
+
+    def on_action_changed(self, combo):
+        active = combo.get_active_id() or "Execute"
+        self.stack.set_visible_child_name(active)
+
+    @staticmethod
+    def detect_action_type(actions_xml: str) -> str:
+        ax = actions_xml.strip()
+        names = re.findall(r'<action\s+name="([^"]+)"', ax)
+        if len(names) != 1:
+            return "Raw"
+        name = names[0]
+        if name in ("Execute", "ShowMenu", "GoToDesktop", "SendToDesktop"):
+            return name
+        return "Raw"
+
+    def load_actions_into_ui(self, typ: str, actions_xml: str):
+        if typ == "Execute":
+            m = re.search(r"<command>(.*?)</command>", actions_xml, re.DOTALL)
+            self.exec_cmd.set_text((unescape_xml(m.group(1).strip()) if m else ""))
+            en = re.search(r"<startupnotify>.*?<enabled>(.*?)</enabled>.*?</startupnotify>", actions_xml, re.DOTALL)
+            nm = re.search(r"<startupnotify>.*?<name>(.*?)</name>.*?</startupnotify>", actions_xml, re.DOTALL)
+            self.sn_enabled.set_active((en.group(1).strip().lower() == "true") if en else False)
+            self.sn_name.set_text(unescape_xml(nm.group(1).strip()) if nm else "")
+            return
+
+        if typ == "ShowMenu":
+            m = re.search(r"<menu>(.*?)</menu>", actions_xml, re.DOTALL)
+            self.menu_name.set_text(unescape_xml(m.group(1).strip()) if m else "")
+            return
+
+        if typ == "GoToDesktop":
+            m_to = re.search(r"<to>(.*?)</to>", actions_xml, re.DOTALL)
+            m_wr = re.search(r"<wrap>(.*?)</wrap>", actions_xml, re.DOTALL)
+            self.goto_box.to_entry.set_text(unescape_xml(m_to.group(1).strip()) if m_to else "")
+            self.goto_box.wrap_check.set_active((m_wr.group(1).strip().lower() == "yes") if m_wr else False)
+            return
+
+        if typ == "SendToDesktop":
+            m_to = re.search(r"<to>(.*?)</to>", actions_xml, re.DOTALL)
+            m_wr = re.search(r"<wrap>(.*?)</wrap>", actions_xml, re.DOTALL)
+            self.send_box.to_entry.set_text(unescape_xml(m_to.group(1).strip()) if m_to else "")
+            self.send_box.wrap_check.set_active((m_wr.group(1).strip().lower() == "yes") if m_wr else False)
+            return
+
+        buf = self.raw_view.get_buffer()
+        buf.set_text(actions_xml.strip() + "\n")
+
+    def build_actions_xml_from_ui(self, typ: str) -> str:
+        if typ == "Execute":
+            cmd = self.exec_cmd.get_text().strip()
+            sn_en = self.sn_enabled.get_active()
+            sn_name = self.sn_name.get_text().strip()
+
+            sn_xml = ""
+            if sn_en or sn_name:
+                sn_xml = "      <startupnotify>\n"
+                if sn_en:
+                    sn_xml += "        <enabled>true</enabled>\n"
+                if sn_name:
+                    sn_xml += f"        <name>{escape_xml(sn_name)}</name>\n"
+                sn_xml += "      </startupnotify>\n"
+
+            return (
+                '<action name="Execute">\n'
+                f"{sn_xml}"
+                f"      <command>{escape_xml(cmd)}</command>\n"
+                "    </action>"
+            )
+
+        if typ == "ShowMenu":
+            menu = self.menu_name.get_text().strip()
+            return (
+                '<action name="ShowMenu">\n'
+                f"      <menu>{escape_xml(menu)}</menu>\n"
+                "    </action>"
+            )
+
+        if typ == "GoToDesktop":
+            to = self.goto_box.to_entry.get_text().strip()
+            wrap = "yes" if self.goto_box.wrap_check.get_active() else "no"
+            return (
+                '<action name="GoToDesktop">\n'
+                f"      <to>{escape_xml(to)}</to>\n"
+                f"      <wrap>{wrap}</wrap>\n"
+                "    </action>"
+            )
+
+        if typ == "SendToDesktop":
+            to = self.send_box.to_entry.get_text().strip()
+            wrap = "yes" if self.send_box.wrap_check.get_active() else "no"
+            return (
+                '<action name="SendToDesktop">\n'
+                f"      <to>{escape_xml(to)}</to>\n"
+                f"      <wrap>{wrap}</wrap>\n"
+                "    </action>"
+            )
+
+        buf = self.raw_view.get_buffer()
+        start, end = buf.get_bounds()
+        return buf.get_text(start, end, True).strip()
+
+    def get_result(self) -> Optional[Keybind]:
+        key = self.shortcut.get_text().strip()
+        if not key:
+            return None
+        typ = self.action_combo.get_active_id() or "Execute"
+        axml = self.build_actions_xml_from_ui(typ)
+        if not axml.strip():
+            return None
+        return Keybind(key=key, actions_xml=axml)
+
+
+def escape_xml(s: str) -> str:
+    return (s.replace("&", "&amp;")
+             .replace("<", "&lt;")
+             .replace(">", "&gt;"))
+
+
+# -----------------------------
+# Main window
+# -----------------------------
+
+class MainWindow(Gtk.ApplicationWindow):
+    def __init__(self, app: Gtk.Application):
+        super().__init__(application=app, title="enBox Shortcut Manager")
+        self.set_default_size(900, 520)
+        self.set_icon_name("keyboard")
+        self.rc_path = RC_DEFAULT
+        self.rc_text: str = ""
+        self.keyboard_xml: str = ""
+        self.kb_dom: Optional[Element] = None
+        self.binds: List[Keybind] = []
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        outer.set_border_width(10)
+        self.add(outer)
+
+        top = Gtk.Box(spacing=8)
+        outer.pack_start(top, False, False, 0)
+
+        top.pack_start(Gtk.Label(label="Openbox config:", xalign=0.0), False, False, 0)
+        self.path_entry = Gtk.Entry()
+        self.path_entry.set_text(self.rc_path)
+        self.path_entry.set_hexpand(True)
+        top.pack_start(self.path_entry, True, True, 0)
+
+        btn_load = Gtk.Button(label="Reload")
+        btn_load.connect("clicked", self.on_load)
+        top.pack_start(btn_load, False, False, 0)
+
+        self.btn_save = Gtk.Button(label="Save")
+        self.btn_save.connect("clicked", self.on_save)
+        top.pack_start(self.btn_save, False, False, 0)
+
+        btn_reload = Gtk.Button(label="Apply")
+        btn_reload.connect("clicked", self.on_reconfigure_openbox)
+        top.pack_start(btn_reload, False, False, 0)
+
+        mid = Gtk.Box(spacing=10)
+        outer.pack_start(mid, True, True, 0)
+
+        # store: key_raw, key_display, actions_display, actions_xml
+        self.store = Gtk.ListStore(str, str, str, str)
+
+        self.tree = Gtk.TreeView(model=self.store)
+        self.tree.get_selection().connect("changed", self.on_selection_changed)
+
+        def add_col(title, idx, expand=False):
+            r = Gtk.CellRendererText()
+            col = Gtk.TreeViewColumn(title, r, text=idx)
+            col.set_resizable(True)
+            col.set_expand(expand)
+            self.tree.append_column(col)
+
+        add_col("Shortcut", 1, expand=False)
+        add_col("Actions", 2, expand=True)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_hexpand(True)
+        sw.set_vexpand(True)
+        sw.add(self.tree)
+        mid.pack_start(sw, True, True, 0)
+
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        mid.pack_start(side, False, False, 0)
+        
+        side.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 8)
+
+        self.btn_add = Gtk.Button(label="Add…")
+        self.btn_add.connect("clicked", self.on_add)
+        side.pack_start(self.btn_add, False, False, 0)
+
+        self.btn_edit = Gtk.Button(label="Edit…")
+        self.btn_edit.set_sensitive(False)
+        self.btn_edit.connect("clicked", self.on_edit)
+        side.pack_start(self.btn_edit, False, False, 0)
+
+        self.btn_del = Gtk.Button(label="Delete")
+        self.btn_del.set_sensitive(False)
+        self.btn_del.connect("clicked", self.on_delete)
+        side.pack_start(self.btn_del, False, False, 0)
+
+        self.status = Gtk.Label(label="", xalign=0.0)
+        outer.pack_start(self.status, False, False, 0)
+
+        self.load_file(self.rc_path)
+
+    def set_status(self, msg: str):
+        self.status.set_text(msg)
+
+    def on_selection_changed(self, sel):
+        model, it = sel.get_selected()
+        active = it is not None
+        self.btn_edit.set_sensitive(active)
+        self.btn_del.set_sensitive(active)
+
+    def selected_index(self) -> Optional[int]:
+        sel = self.tree.get_selection()
+        model, it = sel.get_selected()
+        if it is None:
+            return None
+        path = model.get_path(it)
+        return path.get_indices()[0]
+
+    def refresh_store(self):
+        self.store.clear()
+        for b in self.binds:
+            self.store.append([
+                b.key,
+                pretty_keybind(b.key),
+                summarize_actions(b.actions_xml),
+                b.actions_xml,
+            ])
+
+    def load_file(self, path: str):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                self.rc_text = f.read()
+
+            self.keyboard_xml, _, _ = extract_keyboard_section(self.rc_text)
+            self.kb_dom = parse_keyboard_dom(self.keyboard_xml)
+            self.binds = keybinds_from_dom(self.kb_dom)
+
+            self.refresh_store()
+            self.set_status(f"Loaded {len(self.binds)} keybind(s) from {path}")
+        except Exception as e:
+            self.set_status(f"Load failed: {e}")
+
+    def on_load(self, _btn):
+        self.rc_path = os.path.expanduser(self.path_entry.get_text().strip())
+        self.load_file(self.rc_path)
+
+    def on_add(self, _btn):
+        dlg = KeybindDialog(self, "Add keybind")
+        resp = dlg.run()
+        if resp == Gtk.ResponseType.OK:
+            res = dlg.get_result()
+            if res:
+                self.binds = [b for b in self.binds if b.key != res.key] + [res]
+                self.binds.sort(key=lambda b: b.key.lower())
+                self.refresh_store()
+                self.set_status(f"Added/updated {res.key}")
+            else:
+                self.set_status("Add cancelled (empty shortcut or action)")
+        dlg.destroy()
+
+    def on_edit(self, _btn):
+        idx = self.selected_index()
+        if idx is None:
+            return
+        initial = self.binds[idx]
+        dlg = KeybindDialog(self, "Edit keybind", initial=initial)
+        resp = dlg.run()
+        if resp == Gtk.ResponseType.OK:
+            res = dlg.get_result()
+            if res:
+                self.binds.pop(idx)
+                self.binds = [b for b in self.binds if b.key != res.key] + [res]
+                self.binds.sort(key=lambda b: b.key.lower())
+                self.refresh_store()
+                self.set_status(f"Updated {res.key}")
+            else:
+                self.set_status("Edit cancelled (empty shortcut or action)")
+        dlg.destroy()
+
+    def on_delete(self, _btn):
+        idx = self.selected_index()
+        if idx is None:
+            return
+        key = self.binds[idx].key
+        self.binds.pop(idx)
+        self.refresh_store()
+        self.set_status(f"Deleted {key}")
+
+    def on_save(self, _btn):
+        if not self.kb_dom:
+            self.set_status("Nothing loaded.")
+            return
+
+        try:
+            path = os.path.expanduser(self.path_entry.get_text().strip())
+            with open(path, "r", encoding="utf-8") as f:
+                rc_text = f.read()
+
+            kb_xml, start, end = extract_keyboard_section(rc_text)
+            kb_dom = parse_keyboard_dom(kb_xml)
+
+            update_dom_with_keybinds(kb_dom, self.binds)
+            new_keyboard_xml = pretty_keyboard_xml(kb_dom)
+
+            new_rc = rc_text[:start] + new_keyboard_xml + rc_text[end:]
+
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(new_rc)
+            os.replace(tmp, path)
+
+            self.set_status(f"Saved {len(self.binds)} keybind(s) to {path}")
+        except Exception as e:
+            self.set_status(f"Save failed: {e}")
+
+    def on_reconfigure_openbox(self, _btn):
+        try:
+            subprocess.run(["openbox", "--reconfigure"], check=True)
+            self.set_status("Openbox reconfigured.")
+        except FileNotFoundError:
+            self.set_status("openbox not found in PATH.")
+        except subprocess.CalledProcessError as e:
+            self.set_status(f"openbox --reconfigure failed: {e}")
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="local.openbox.keybind.editor")
+
+    def do_activate(self):
+        win = MainWindow(self)
+        win.show_all()
+
+
+def main():
+    App().run(None)
+
+
+if __name__ == "__main__":
+    main()
