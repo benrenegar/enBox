@@ -1,6 +1,14 @@
 #!/bin/bash
+#
+#                ____            
+#    ___  ____  / __ )____  _  __
+#   / _ \/ __ \/ __  / __ \| |/_/
+#  /  __/ / / / /_/ / /_/ />  <  
+# \___/_/ /_/_____/\____/_/|_|  
+#
+# enBox Desktop Environment
+# Restart Environment
 
-# Reset desktop environment
 echo - - - Restarting desktop environment - - -
 echo
 echo [1] Compositor

@@ -1,45 +1,103 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
+#
+#                ____            
+#    ___  ____  / __ )____  _  __
+#   / _ \/ __ \/ __  / __ \| |/_/
+#  /  __/ / / / /_/ / /_/ />  <  
+# \___/_/ /_/_____/\____/_/|_|  
+#
+# enBox Desktop Environment
+# Session Exit
 
-# enBox Environment Exit script
 
-choice=$(yad \
-  --title="enBox Session" \
-  --window-icon=system-shutdown \
-  --text="Currently logged in as $USER@$HOSTNAME\n" \
-  --width=400 \
-  --borders=20 \
-  --fixed \
-  --center \
-  --buttons-layout=grid \
-  --button=" Log out!system-log-out:0" \
-  --button=" Shutdown!system-shutdown:1" \
-  --button=" Restart!system-reboot:2" \
-  --button=" Sleep!system-suspend:3" \
-  --button=" Hibernate!system-hibernate:4" \
-  --escape-ok \
-  --no-markup
-)
+import gi
+import os
+import subprocess
+import socket
 
-exit_code=$?
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk
 
-case "$exit_code" in
-  0)
-    openbox --exit
-    ;;
-  1)
-    systemctl poweroff
-    ;;
-  2)
-    systemctl reboot
-    ;;
-  3)
-    xscreensaver-command -lock && systemctl suspend
-    ;;
-  4)
-    systemctl hibernate
-    ;;
-  *)
-    # Cancel or ESC — do nothing
-    exit 0
-    ;;
-esac
+class ExitDialog(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="enBox Session")
+        self.set_border_width(20)
+        self.set_default_size(420, 200)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_resizable(False)
+        self.set_icon_name("system-shutdown")
+
+        self.connect("destroy", Gtk.main_quit)
+        self.connect("key-press-event", self.on_key_press)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.add(vbox)
+
+        label = Gtk.Label(label=f"Currently logged in as {os.getenv('USER')}@{socket.gethostname()}")
+        vbox.pack_start(label, False, False, 0)
+
+        grid = Gtk.Grid(row_spacing=10, column_spacing=10)
+        grid.set_halign(Gtk.Align.CENTER)
+        grid.set_valign(Gtk.Align.CENTER)
+        vbox.pack_start(grid, True, True, 0)
+
+        buttons = [
+            ("Log out", "system-log-out", self.logout),
+            ("Shutdown", "system-shutdown", self.shutdown),
+            ("Restart", "system-reboot", self.reboot),
+            ("Sleep", "system-suspend", self.sleep),
+            ("Hibernate", "system-hibernate", self.hibernate),
+            ("Cancel", "gtk-cancel", self.cancel),
+        ]
+
+        for i, (label, icon, callback) in enumerate(buttons):
+            button = Gtk.Button()
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            box.set_margin_top(5)
+            box.set_margin_bottom(5)
+            box.set_margin_start(10)
+            box.set_margin_end(10)
+
+            image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON)
+            box.pack_start(image, True, True, 0)
+
+            text = Gtk.Label(label=label)
+            box.pack_start(text, True, True, 0)
+
+            button.add(box)
+            button.connect("clicked", callback)
+
+            grid.attach(button, i % 3, i // 3, 1, 1)
+
+    def on_key_press(self, widget, event):
+        if event.keyval == Gdk.KEY_Escape:
+            Gtk.main_quit()
+
+    def logout(self, widget):
+        subprocess.run(["openbox", "--exit"])
+        Gtk.main_quit()
+
+    def shutdown(self, widget):
+        subprocess.run(["systemctl", "poweroff"])
+        Gtk.main_quit()
+
+    def reboot(self, widget):
+        subprocess.run(["systemctl", "reboot"])
+        Gtk.main_quit()
+
+    def sleep(self, widget):
+        subprocess.run(["xscreensaver-command", "-lock"])
+        subprocess.run(["systemctl", "suspend"])
+        Gtk.main_quit()
+
+    def hibernate(self, widget):
+        subprocess.run(["systemctl", "hibernate"])
+        Gtk.main_quit()
+
+    def cancel(self, widget):
+        Gtk.main_quit()
+
+
+win = ExitDialog()
+win.show_all()
+Gtk.main()

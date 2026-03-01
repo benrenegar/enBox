@@ -1,4 +1,13 @@
 #!/bin/bash
+#
+#                ____            
+#    ___  ____  / __ )____  _  __
+#   / _ \/ __ \/ __  / __ \| |/_/
+#  /  __/ / / / /_/ / /_/ />  <  
+# \___/_/ /_/_____/\____/_/|_|  
+#
+# enBox Desktop Environment
+# Show Menu
 
 xdotool key SUPER
 

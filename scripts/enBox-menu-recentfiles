@@ -1,4 +1,15 @@
 #!/bin/sh
+#
+#                ____            
+#    ___  ____  / __ )____  _  __
+#   / _ \/ __ \/ __  / __ \| |/_/
+#  /  __/ / / / /_/ / /_/ />  <  
+# \___/_/ /_/_____/\____/_/|_|  
+#
+# enBox Desktop Environment
+# Recent Files Menu
+
+
 #    cb-recent-files-pipemenu - a script to parse .recently-used.xbel
 #    and generate openbox pipe menu
 #    Copyright (C) 2010  John Crawley

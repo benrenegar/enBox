@@ -1,4 +1,14 @@
 #!/bin/sh
+#
+#                ____            
+#    ___  ____  / __ )____  _  __
+#   / _ \/ __ \/ __  / __ \| |/_/
+#  /  __/ / / / /_/ / /_/ />  <  
+# \___/_/ /_/_____/\____/_/|_|  
+#
+# enBox Desktop Environment
+# Window Switcher
+
 
 TEMPFILE=/tmp/$$.tmp
 COUNTER=0

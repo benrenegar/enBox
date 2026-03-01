@@ -1,5 +1,14 @@
 #!/bin/sh
-# Generate "Recently visited websites" OpenBox dynamic menu
+#
+#                ____            
+#    ___  ____  / __ )____  _  __
+#   / _ \/ __ \/ __  / __ \| |/_/
+#  /  __/ / / / /_/ / /_/ />  <  
+# \___/_/ /_/_____/\____/_/|_|  
+#
+# enBox Desktop Environment
+# Recent Webpages Menu
+
 
 # path to the sqlite3 binary
 sqlite_path=`which sqlite3`

@@ -1,4 +1,14 @@
 #!/bin/bash
+#
+#                ____            
+#    ___  ____  / __ )____  _  __
+#   / _ \/ __ \/ __  / __ \| |/_/
+#  /  __/ / / / /_/ / /_/ />  <  
+# \___/_/ /_/_____/\____/_/|_|  
+#
+# enBox Desktop Environment
+# Update Menu
+
 
 ~/scripts/enBox/enBox-app-discover > ~/.config/openbox/appmenu.xml
 notify-send "Application menu updated" "Discovered applications have been added to the application menu." -i dialog-information -t 5000

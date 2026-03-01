@@ -1,21 +1,14 @@
 #!/usr/bin/env python3
 #
-# Version 3.0.0
-# Revised: onuronsekiz (overlord)
-# Original Author: rmoe (v1.1.7)
+#                ____            
+#    ___  ____  / __ )____  _  __
+#   / _ \/ __ \/ __  / __ \| |/_/
+#  /  __/ / / / /_/ / /_/ />  <  
+# \___/_/ /_/_____/\____/_/|_|  
 #
-# / revisions and additions:
-#
-# - recoded for python 3.9+
-# - menu sort for both categories and programs
-# - finding all possible icons by searching deeply in themes
-# - icon search algorithm for faster approach 
-# - desktop item ignored if Exec command not found in system
-# - automatic and direct theme selection if possible
-# - flatpak applications support
-# - duplicate icon handling
-#
-# ----- config ---
+# enBox Desktop Environment
+# Application Discovery
+                             
 
 import subprocess, glob, os
 
@@ -31,8 +24,8 @@ except IOError:
 	selected_theme = "Papirus" #fallback theme
 
 selected_theme = "Papirus" # direct theme selection, don't make it hicolor.   ***** SOME DISTRIBUTIONS REQUIRES THIS OPTION UNCOMMENTED.
-application_groups = ("AudioVideo", "Development", "Engineering", "Games", "Graphics", "Internet",  "Multimedia", "Office", "System",  "Utilities", "WINE", "VirtualBox") # enter here new category as you wish, it will be sorted 
-group_aliases = {"Audio":"Multimedia","Video":"Multimedia","AudioVideo":"Multimedia","Network":"Internet","Game":"Games", "Utility":"Utilities", "Utilities":"Utilities", "Email":"Internet", "VM":"VirtualBox", "Programming":"Development","Editors":"Development","Other":"WINE","Wine":"WINE","Settings":"System","GTK":"",  "GNOME":""}
+application_groups = ("AudioVideo", "Development", "Engineering", "Games", "Graphics", "Internet",  "Misc", "Multimedia", "Office", "System",  "Utilities", "Windows", "Emulation") # enter here new category as you wish, it will be sorted 
+group_aliases = {"Audio":"Multimedia","Video":"Multimedia","AudioVideo":"Multimedia","Network":"Internet","Game":"Games", "Utility":"Utilities", "Utilities":"Utilities", "Email":"Internet", "VM":"Emulation", "Emulator":"Emulation", "Programming":"Development","Editors":"Development","Other":"Misc","WINE":"Windows","Settings":"System","GTK":"",  "GNOME":""}
 ignoreList = ("wine-extension-","gtk3-icon-browser","evince-previewer", "Ted",  "wingide3.2", "python3.4", "feh","gnome-software", )
 prefixes = ("legacy","categories","apps","devices","mimetypes","places","preferences","actions", "status","emblems","symbolic") #added for prefered icon dirs and sizes. could be gathered automatically but wouldn't be sorted like this
 iconSizes = ("16","32","24","48","16x16","40x40","36x36","32x32","24x24","64x64","72x72","96x96","48x48","128x128","256x256","scalable")

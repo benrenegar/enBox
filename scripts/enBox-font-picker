@@ -1,0 +1,686 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import re
+import shutil
+import subprocess
+import datetime
+import configparser
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Pango, GLib
+
+APP_TITLE = "enBox Font Picker"
+
+# ----------------------------
+# Helpers
+# ----------------------------
+
+def now_stamp() -> str:
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+def ensure_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+def backup_file(path: Path) -> Optional[Path]:
+    if not path.exists():
+        return None
+    b = path.with_name(path.name + f".bak-{now_stamp()}")
+    shutil.copy2(path, b)
+    return b
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+def write_text_atomic(path: Path, text: str) -> None:
+    ensure_parent(path)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+def which(cmd: str) -> Optional[str]:
+    return shutil.which(cmd)
+
+def run_cmd(cmd: List[str]) -> Tuple[int, str, str]:
+    try:
+        p = subprocess.run(cmd, text=True, capture_output=True)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except Exception as e:
+        return 999, "", str(e)
+
+def pango_family_only(font_desc: str) -> str:
+    """
+    Take a Pango font description string and return only the family.
+    e.g. "FiraGO SemiBold 11" -> "FiraGO"
+    """
+    d = Pango.FontDescription(font_desc)
+    fam = d.get_family()
+    if fam and fam.strip():
+        return fam.strip()
+
+    # Fallback: strip trailing size and style-ish tokens heuristically
+    s = font_desc.strip()
+    s = re.sub(r"\s+\d+(\.\d+)?\s*$", "", s)
+    return s.strip() if s else font_desc
+
+# ----------------------------
+# Targets / Apply logic
+# ----------------------------
+
+class ApplyContext:
+    def __init__(self, ui: str, doc: str, mono: str):
+        self.ui = ui
+        self.doc = doc
+        self.mono = mono
+
+def update_keyed_lines(existing: str, mapping: Dict[str, str], sep: str = ":") -> str:
+    """
+    For Xresources-style 'key: value' lines. Replace keys if present, else append.
+    Preserves unrelated lines.
+    """
+    lines = existing.splitlines()
+    seen = set()
+    out = []
+
+    key_re = re.compile(rf"^\s*({re.escape('')})")  # placeholder; not used
+
+    for line in lines:
+        stripped = line.strip()
+        replaced = False
+        for k, v in mapping.items():
+            # match beginning: key + optional whitespace + sep
+            if re.match(rf"^\s*{re.escape(k)}\s*{re.escape(sep)}", line):
+                out.append(f"{k}{sep} {v}".rstrip())
+                seen.add(k)
+                replaced = True
+                break
+        if not replaced:
+            out.append(line)
+
+    # append any missing keys
+    if out and out[-1].strip() != "":
+        out.append("")
+    for k, v in mapping.items():
+        if k not in seen:
+            out.append(f"{k}{sep} {v}".rstrip())
+
+    return "\n".join(out) + ("\n" if not out or not out[-1].endswith("\n") else "")
+
+def update_simple_kv(existing: str, key: str, value: str) -> str:
+    """
+    Replace 'key=...' or 'key = ...' (first match), else append.
+    """
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*.*$", re.MULTILINE)
+    if pattern.search(existing):
+        return pattern.sub(f"{key}={value}", existing, count=1)
+    # append
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    return existing + f"{key}={value}\n"
+
+def update_ini_setting(path: Path, section: str, key: str, value: str) -> str:
+    """
+    settings.ini style. We keep it simple and text-based:
+    - ensure [section] exists
+    - replace key within section, else add inside
+    """
+    text = read_text(path) if path.exists() else ""
+    lines = text.splitlines()
+    out = []
+    in_section = False
+    section_found = False
+    key_set = False
+
+    sec_header = f"[{section}]"
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            if in_section and not key_set:
+                out.append(f"{key}={value}")
+                key_set = True
+            in_section = (s == sec_header)
+            if in_section:
+                section_found = True
+            out.append(line)
+            i += 1
+            continue
+
+        if in_section:
+            m = re.match(rf"^\s*{re.escape(key)}\s*=", line)
+            if m and not key_set:
+                out.append(f"{key}={value}")
+                key_set = True
+            else:
+                out.append(line)
+        else:
+            out.append(line)
+        i += 1
+
+    if not section_found:
+        if out and out[-1].strip() != "":
+            out.append("")
+        out.append(sec_header)
+        out.append(f"{key}={value}")
+        key_set = True
+    elif section_found and not key_set:
+        out.append(f"{key}={value}")
+
+    return "\n".join(out) + "\n"
+
+def update_tint2_fonts(existing: str, ui_family: str) -> str:
+    mapping = {
+        "taskbar_name_font": f"{ui_family} Medium 13",
+        "task_font": f"{ui_family} 11",
+        "tooltip_font": f"{ui_family} 10",
+    }
+    lines = existing.splitlines()
+    out = []
+    seen = set()
+
+    for line in lines:
+        replaced = False
+        for k, v in mapping.items():
+            if re.match(rf"^\s*{re.escape(k)}\s*=", line):
+                out.append(f"{k} = {v}")
+                seen.add(k)
+                replaced = True
+                break
+        if not replaced:
+            out.append(line)
+
+    if out and out[-1].strip() != "":
+        out.append("")
+    for k, v in mapping.items():
+        if k not in seen:
+            out.append(f"{k} = {v}")
+    return "\n".join(out) + "\n"
+
+def update_openbox_rcxml(path: Path, ui_family: str) -> None:
+    """
+    Minimal XML-ish edit:
+    For <font place="..."> blocks, replace <name>...</name> for specific places.
+    We avoid a full XML parser so we don't rewrite formatting/ordering too much.
+    """
+    text = read_text(path)
+
+    # Places and desired name text
+    desired = {
+        "ActiveWindow": ui_family,
+        "InactiveWindow": ui_family,
+        "MenuHeader": ui_family,
+        "MenuItem": ui_family,
+        "ActiveOnScreenDisplay": f"{ui_family} Medium",
+        "InactiveOnScreenDisplay": ui_family,
+    }
+
+    def repl_block(m: re.Match) -> str:
+        place = m.group("place")
+        block = m.group(0)
+        if place not in desired:
+            return block
+        # replace first <name>...</name> within block
+        return re.sub(
+            r"(<name>)(.*?)(</name>)",
+            rf"\1{desired[place]}\3",
+            block,
+            count=1,
+            flags=re.DOTALL,
+        )
+
+    font_block_re = re.compile(
+        r"<font\s+place=\"(?P<place>[^\"]+)\"\s*>(?P<body>.*?)</font>",
+        re.DOTALL,
+    )
+
+    new_text = font_block_re.sub(repl_block, text)
+    if new_text != text:
+        backup_file(path)
+        write_text_atomic(path, new_text)
+
+def update_fontconfig_fontsconf(path: Path, ui_family: str, doc_family: str, mono_family: str) -> None:
+    """
+    fonts.conf should be valid XML, but we do a conservative regex-based edit:
+    find <match> blocks that test 'monospace'/'sans'/'sans serif'/'sans-serif'/'serif'
+    and replace the <edit ... name="family"> ... <string>VALUE</string> inside that edit.
+    """
+    text = read_text(path) if path.exists() else ""
+
+    # If empty/nonexistent, we can generate a minimal file containing your rules.
+    if not text.strip():
+        generated = f"""<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <match target="pattern">
+    <test name="family" qual="any"><string>monospace</string></test>
+    <edit binding="strong" mode="prepend" name="family"><string>{mono_family}</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family" qual="any"><string>sans</string></test>
+    <edit binding="strong" mode="prepend" name="family"><string>{ui_family}</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family" qual="any"><string>sans serif</string></test>
+    <edit binding="strong" mode="prepend" name="family"><string>{ui_family}</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family" qual="any"><string>sans-serif</string></test>
+    <edit binding="strong" mode="prepend" name="family"><string>{ui_family}</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family" qual="any"><string>serif</string></test>
+    <edit binding="strong" mode="prepend" name="family"><string>{doc_family}</string></edit>
+  </match>
+</fontconfig>
+"""
+        backup_file(path)  # probably None
+        write_text_atomic(path, generated)
+        return
+
+    def replace_for_test_value(test_value: str, new_family: str, src: str) -> str:
+        # Find a <match> ... <test ...><string>test_value</string> ... <edit ... name="family"> ... <string>...</string>
+        # Replace that <edit> string.
+        match_re = re.compile(
+            rf"(<match\b.*?>.*?"
+            rf"<test\b[^>]*name=\"family\"[^>]*>.*?<string>\s*{re.escape(test_value)}\s*</string>.*?</test>.*?"
+            rf"<edit\b[^>]*name=\"family\"[^>]*>.*?<string>)(.*?)(</string>.*?</edit>.*?</match>)",
+            re.DOTALL
+        )
+        return match_re.sub(rf"\1{new_family}\3", src, count=1)
+
+    new_text = text
+    new_text = replace_for_test_value("monospace", mono_family, new_text)
+    new_text = replace_for_test_value("sans", ui_family, new_text)
+    new_text = replace_for_test_value("sans serif", ui_family, new_text)
+    new_text = replace_for_test_value("sans-serif", ui_family, new_text)
+    new_text = replace_for_test_value("serif", doc_family, new_text)
+
+    if new_text != text:
+        backup_file(path)
+        write_text_atomic(path, new_text)
+
+def find_firefox_profiles() -> List[Path]:
+    base = Path.home() / ".mozilla" / "firefox"
+    ini = base / "profiles.ini"
+    if not ini.exists():
+        return []
+    cp = configparser.RawConfigParser()
+    try:
+        cp.read(ini, encoding="utf-8")
+    except Exception:
+        return []
+
+    profiles = []
+    for sec in cp.sections():
+        if not sec.lower().startswith("profile"):
+            continue
+        try:
+            path = cp.get(sec, "Path", fallback="").strip()
+            is_rel = cp.getint(sec, "IsRelative", fallback=1)
+        except Exception:
+            continue
+        if not path:
+            continue
+        prof_dir = (base / path) if is_rel else Path(path)
+        if prof_dir.exists() and prof_dir.is_dir():
+            profiles.append(prof_dir)
+    return profiles
+
+def update_firefox_prefs(prefs_path: Path, ui_family: str, doc_family: str, mono_family: str) -> None:
+    """
+    Ensure the prefs exist (replace if present, append otherwise).
+    We only touch the exact keys you listed.
+    """
+    desired = {
+        'user_pref("font.default.x-western", "sans-serif");': None,  # keep as is but ensure present
+        f'user_pref("font.name.sans-serif.x-western", "{ui_family}");': "font.name.sans-serif.x-western",
+        f'user_pref("font.name.serif.x-western", "{doc_family}");': "font.name.serif.x-western",
+        f'user_pref("font.name.fixed.x-western", "{mono_family}");': "font.name.fixed.x-western",
+        'user_pref("font.size.variable.x-western", 11);': "font.size.variable.x-western",
+        'user_pref("font.size.fixed.x-western", 11);': "font.size.fixed.x-western",
+    }
+
+    text = read_text(prefs_path) if prefs_path.exists() else ""
+    original = text
+
+    def upsert_pref(text_in: str, pref_key: str, new_line: str) -> str:
+        # pref_key like font.name.fixed.x-western
+        pref_re = re.compile(
+            rf'^\s*user_pref\("{re.escape(pref_key)}",\s*.*\);\s*$',
+            re.MULTILINE
+        )
+        if pref_re.search(text_in):
+            return pref_re.sub(new_line, text_in, count=1)
+        if text_in and not text_in.endswith("\n"):
+            text_in += "\n"
+        return text_in + new_line + "\n"
+
+    # Ensure default line
+    if 'user_pref("font.default.x-western",' not in text:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += 'user_pref("font.default.x-western", "sans-serif");\n'
+
+    # Upsert the rest
+    text = upsert_pref(text, "font.name.sans-serif.x-western", f'user_pref("font.name.sans-serif.x-western", "{ui_family}");')
+    text = upsert_pref(text, "font.name.serif.x-western", f'user_pref("font.name.serif.x-western", "{doc_family}");')
+    text = upsert_pref(text, "font.name.fixed.x-western", f'user_pref("font.name.fixed.x-western", "{mono_family}");')
+    text = upsert_pref(text, "font.size.variable.x-western", 'user_pref("font.size.variable.x-western", 11);')
+    text = upsert_pref(text, "font.size.fixed.x-western", 'user_pref("font.size.fixed.x-western", 11);')
+
+    if text != original:
+        backup_file(prefs_path)
+        write_text_atomic(prefs_path, text)
+
+def apply_all(ctx: ApplyContext, log_fn) -> None:
+    home = Path.home()
+
+    # 1) ~/.Xresources
+    xres = home / ".Xresources"
+    xres_map = {
+        "xscreensaver-auth.*.Dialog.headingFont": f"{ctx.ui} 11",
+        "xscreensaver-auth.*.Dialog.bodyFont": f"{ctx.ui} 11",
+        "xscreensaver-auth.*.Dialog.labelFont": f"{ctx.ui} 11",
+        "xscreensaver-auth.*.Dialog.unameFont": f"{ctx.ui} Bold 18",
+        "xscreensaver-auth.*.Dialog.buttonFont": f"{ctx.ui} 11",
+        "xscreensaver-auth.*.Dialog.dateFont": f"{ctx.ui} Light 11",
+    }
+    old = read_text(xres) if xres.exists() else ""
+    new = update_keyed_lines(old, xres_map, sep=":")
+    if new != old:
+        backup_file(xres)
+        write_text_atomic(xres, new)
+        log_fn(f"✅ Updated {xres}")
+    else:
+        log_fn(f"↩️ No change {xres}")
+
+    # Merge Xresources
+    if which("xrdb"):
+        rc, out, err = run_cmd(["xrdb", "-merge", str(xres)])
+        if rc == 0:
+            log_fn("✅ Ran: xrdb -merge ~/.Xresources")
+        else:
+            log_fn(f"⚠️ xrdb -merge failed ({rc}): {err or out}")
+    else:
+        log_fn("ℹ️ xrdb not found; skipped merge")
+
+    # 2) ~/.gtkrc-2.0.mine
+    gtkrc_mine = home / ".gtkrc-2.0.mine"
+    old = read_text(gtkrc_mine) if gtkrc_mine.exists() else ""
+    # preserve quotes as per your spec
+    new = update_simple_kv(old, "gtk-font-name", f"\"{ctx.ui} 11\"")
+    if new != old:
+        backup_file(gtkrc_mine)
+        write_text_atomic(gtkrc_mine, new)
+        log_fn(f"✅ Updated {gtkrc_mine}")
+    else:
+        log_fn(f"↩️ No change {gtkrc_mine}")
+
+    # 3) ~/.config/gtk-3.0/settings.ini
+    gtk3_ini = home / ".config" / "gtk-3.0" / "settings.ini"
+    old = read_text(gtk3_ini) if gtk3_ini.exists() else ""
+    new = update_ini_setting(gtk3_ini, "Settings", "gtk-font-name", f"{ctx.ui} 11")
+    if new != old:
+        backup_file(gtk3_ini)
+        write_text_atomic(gtk3_ini, new)
+        log_fn(f"✅ Updated {gtk3_ini}")
+    else:
+        log_fn(f"↩️ No change {gtk3_ini}")
+
+    # 4) ~/.config/gtk-2.0/.gtkrc-2.0
+    gtk2_rc = home / ".config" / "gtk-2.0" / ".gtkrc-2.0"
+    old = read_text(gtk2_rc) if gtk2_rc.exists() else ""
+    new = update_simple_kv(old, "gtk-font-name", f"\"{ctx.ui} 11\"")
+    if new != old:
+        backup_file(gtk2_rc)
+        write_text_atomic(gtk2_rc, new)
+        log_fn(f"✅ Updated {gtk2_rc}")
+    else:
+        log_fn(f"↩️ No change {gtk2_rc}")
+
+    # 5) tint2
+    for p in [
+        home / ".config" / "tint2" / "tint2rc",
+        home / ".config" / "tint2" / "tint2rc-launchbar",
+    ]:
+        if not p.exists():
+            log_fn(f"ℹ️ Missing {p}; skipped")
+            continue
+        old = read_text(p)
+        new = update_tint2_fonts(old, ctx.ui)
+        if new != old:
+            backup_file(p)
+            write_text_atomic(p, new)
+            log_fn(f"✅ Updated {p}")
+        else:
+            log_fn(f"↩️ No change {p}")
+
+    # 6) openbox rc.xml
+    ob = home / ".config" / "openbox" / "rc.xml"
+    if ob.exists():
+        try:
+            update_openbox_rcxml(ob, ctx.ui)
+            log_fn(f"✅ Updated {ob} (font <name> nodes)")
+        except Exception as e:
+            log_fn(f"❌ Failed updating {ob}: {e}")
+    else:
+        log_fn(f"ℹ️ Missing {ob}; skipped")
+
+    # 7) fontconfig
+    fc = home / ".config" / "fontconfig" / "fonts.conf"
+    try:
+        ensure_parent(fc)
+        update_fontconfig_fontsconf(fc, ctx.ui, ctx.doc, ctx.mono)
+        log_fn(f"✅ Updated {fc}")
+    except Exception as e:
+        log_fn(f"❌ Failed updating {fc}: {e}")
+
+    # 8) Firefox prefs.js across profiles
+    profiles = find_firefox_profiles()
+    if not profiles:
+        log_fn("ℹ️ No Firefox profiles found; skipped")
+    else:
+        for prof in profiles:
+            prefs = prof / "prefs.js"
+            try:
+                update_firefox_prefs(prefs, ctx.ui, ctx.doc, ctx.mono)
+                log_fn(f"✅ Updated Firefox prefs: {prefs}")
+            except Exception as e:
+                log_fn(f"❌ Failed Firefox prefs {prefs}: {e}")
+
+    # 9) Desktop commands (best-effort)
+    # GNOME
+    if which("gsettings"):
+        cmds = [
+            ["gsettings", "set", "org.gnome.desktop.interface", "font-name", f"{ctx.ui} 11"],
+            ["gsettings", "set", "org.gnome.desktop.interface", "document-font-name", f"{ctx.doc} 12"],
+            ["gsettings", "set", "org.gnome.desktop.interface", "monospace-font-name", f"{ctx.mono} 12"],
+        ]
+        for c in cmds:
+            rc, out, err = run_cmd(c)
+            if rc == 0:
+                log_fn(f"✅ Ran: {' '.join(c)}")
+            else:
+                log_fn(f"⚠️ gsettings failed ({rc}): {err or out}")
+    else:
+        log_fn("ℹ️ gsettings not found; skipped GNOME")
+
+    # KDE (writes kdeglobals)
+    if which("kwriteconfig6"):
+        cmds = [
+            ["kwriteconfig6", "--file", str(home / ".config" / "kdeglobals"),
+             "--group", "General", "--key", "font", f"{ctx.ui},11,-1,-1,-1,-1"],
+            ["kwriteconfig6", "--file", str(home / ".config" / "kdeglobals"),
+             "--group", "General", "--key", "fixed", f"{ctx.mono},11,-1,-1,-1,-1"],
+        ]
+        for c in cmds:
+            rc, out, err = run_cmd(c)
+            if rc == 0:
+                log_fn(f"✅ Ran: {' '.join(c)}")
+            else:
+                log_fn(f"⚠️ kwriteconfig6 failed ({rc}): {err or out}")
+    else:
+        log_fn("ℹ️ kwriteconfig6 not found; skipped KDE")
+
+    # XFCE
+    if which("xfconf-query"):
+        c = ["xfconf-query", "-c", "xsettings", "-p", "/Gtk/FontName", "-s", f"{ctx.ui} 11"]
+        rc, out, err = run_cmd(c)
+        if rc == 0:
+            log_fn(f"✅ Ran: {' '.join(c)}")
+        else:
+            log_fn(f"⚠️ xfconf-query failed ({rc}): {err or out}")
+    else:
+        log_fn("ℹ️ xfconf-query not found; skipped XFCE")
+
+    # LXQT
+    if which("lxqt-config-qt5"):
+        c = ["lxqt-config-qt5", "set", "font", f"{ctx.ui},11"]
+        rc, out, err = run_cmd(c)
+        if rc == 0:
+            log_fn(f"✅ Ran: {' '.join(c)}")
+        else:
+            log_fn(f"⚠️ lxqt-config-qt5 failed ({rc}): {err or out}")
+    else:
+        log_fn("ℹ️ lxqt-config-qt5 not found; skipped LXQT")
+
+# ----------------------------
+# GTK UI
+# ----------------------------
+
+class App(Gtk.Window):
+    def __init__(self):
+        super().__init__(title=APP_TITLE)
+        self.set_border_width(14)
+        self.set_default_size(700, 520)
+        self.set_resizable(True)
+        self.set_icon_name("fonts")
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.add(vbox)
+
+        grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        vbox.pack_start(grid, False, False, 0)
+
+        # UI font
+        grid.attach(Gtk.Label(label="User Interface font family:", xalign=0), 0, 0, 1, 1)
+        self.ui_btn = Gtk.FontButton()
+        self.ui_btn.set_show_size(False)
+        self.ui_btn.set_show_style(True)
+        self.ui_btn.set_font_name("FiraGO 11")
+        self.ui_btn.connect("font-set", self.on_font_changed)
+        grid.attach(self.ui_btn, 1, 0, 1, 1)
+
+        # Document font
+        grid.attach(Gtk.Label(label="Document font family:", xalign=0), 0, 1, 1, 1)
+        self.doc_btn = Gtk.FontButton()
+        self.doc_btn.set_show_size(False)
+        self.doc_btn.set_show_style(True)
+        self.doc_btn.set_font_name("Liberation Serif 12")
+        self.doc_btn.connect("font-set", self.on_font_changed)
+        grid.attach(self.doc_btn, 1, 1, 1, 1)
+
+        # Monospace font
+        grid.attach(Gtk.Label(label="Monospace font family:", xalign=0), 0, 2, 1, 1)
+        self.mono_btn = Gtk.FontButton()
+        self.mono_btn.set_show_size(False)
+        self.mono_btn.set_show_style(True)
+        self.mono_btn.set_font_name("Monospace 11")
+        self.mono_btn.connect("font-set", self.on_font_changed)
+        grid.attach(self.mono_btn, 1, 2, 1, 1)
+
+        # Preview
+        frame = Gtk.Frame(label="Preview")
+        vbox.pack_start(frame, False, False, 0)
+        prev_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        prev_box.set_border_width(10)
+        frame.add(prev_box)
+
+        self.prev_ui = Gtk.Label(xalign=0, label="User Interface: The quick brown fox jumps over the lazy dog 0123456789")
+        self.prev_doc = Gtk.Label(xalign=0, label="Documents: The quick brown fox jumps over the lazy dog 0123456789")
+        self.prev_mono = Gtk.Label(xalign=0, label="Monospace: The quick brown fox jumps over the lazy dog 0123456789")
+
+        prev_box.pack_start(self.prev_ui, False, False, 0)
+        prev_box.pack_start(self.prev_doc, False, False, 0)
+        prev_box.pack_start(self.prev_mono, False, False, 0)
+
+        # Buttons
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        vbox.pack_start(btn_box, False, False, 0)
+
+        self.apply_btn = Gtk.Button(label="Apply")
+        self.apply_btn.connect("clicked", self.on_apply)
+        btn_box.pack_start(self.apply_btn, False, False, 0)
+
+        self.quit_btn = Gtk.Button(label="Quit")
+        self.quit_btn.connect("clicked", lambda *_: self.close())
+        btn_box.pack_start(self.quit_btn, False, False, 0)
+
+        # Log output
+        log_frame = Gtk.Frame(label="Log")
+        vbox.pack_start(log_frame, True, True, 0)
+
+        self.log_buf = Gtk.TextBuffer()
+        log_view = Gtk.TextView(buffer=self.log_buf)
+        log_view.set_editable(False)
+        log_view.set_cursor_visible(False)
+        log_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_hexpand(True)
+        scroller.set_vexpand(True)
+        scroller.add(log_view)
+        log_frame.add(scroller)
+
+        self.on_font_changed(None)
+
+    def log(self, msg: str) -> None:
+        end = self.log_buf.get_end_iter()
+        self.log_buf.insert(end, msg + "\n")
+
+    def get_ctx(self) -> ApplyContext:
+        ui = pango_family_only(self.ui_btn.get_font_name())
+        doc = pango_family_only(self.doc_btn.get_font_name())
+        mono = pango_family_only(self.mono_btn.get_font_name())
+        return ApplyContext(ui=ui, doc=doc, mono=mono)
+
+    def on_font_changed(self, *_):
+        ctx = self.get_ctx()
+        self.prev_ui.modify_font(Pango.FontDescription(f"{ctx.ui} 11"))
+        self.prev_doc.modify_font(Pango.FontDescription(f"{ctx.doc} 12"))
+        self.prev_mono.modify_font(Pango.FontDescription(f"{ctx.mono} 11"))
+
+    def on_apply(self, *_):
+        ctx = self.get_ctx()
+        self.log(f"--- Applying fonts ---")
+        self.log(f"UI   = {ctx.ui}")
+        self.log(f"DOC  = {ctx.doc}")
+        self.log(f"MONO = {ctx.mono}")
+        self.log("")
+
+        self.apply_btn.set_sensitive(False)
+
+        def work():
+            try:
+                apply_all(ctx, self.log)
+            finally:
+                GLib.idle_add(self.apply_btn.set_sensitive, True)
+                GLib.idle_add(self.log, "--- Done ---")
+            return False
+
+        # Run work in idle to keep UI responsive-ish (still same process)
+        GLib.idle_add(work)
+
+def main():
+    win = App()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+if __name__ == "__main__":
+    main()

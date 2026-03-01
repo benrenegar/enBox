@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+#
+#                ____            
+#    ___  ____  / __ )____  _  __
+#   / _ \/ __ \/ __  / __ \| |/_/
+#  /  __/ / / / /_/ / /_/ />  <  
+# \___/_/ /_/_____/\____/_/|_|  
+#
+# enBox Desktop Environment
+# Accent Color Chooser
+
+
 import os
 import re
 import shutil

@@ -1,10 +1,14 @@
-#!/bin/sh
-# Generate "Bookmarks Toolbar websites" OpenBox dynamic menu
-
-# Function to extract favicon URL from HTML
 #!/bin/bash
+#
+#                ____            
+#    ___  ____  / __ )____  _  __
+#   / _ \/ __ \/ __  / __ \| |/_/
+#  /  __/ / / / /_/ / /_/ />  <  
+# \___/_/ /_/_____/\____/_/|_|  
+#
+# enBox Desktop Environment
+# Bookmarks Menu
 
-# Function to extract favicon URL from HTML
 
 # path to the sqlite3 binary
 sqlite_path=`which sqlite3`
